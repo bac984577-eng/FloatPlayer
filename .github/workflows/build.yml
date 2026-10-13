@@ -1,0 +1,861 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Generate Android project
+        run: |
+          mkdir -p proj/app/src/main/java/com/floatplayer proj/app/src/main/assets
+          cd proj
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'FloatPlayer'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.floatplayer'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.floatplayer'
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <application
+                  android:label="مشغّل الدراسة"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".PlayerService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaPlayback"/>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/floatplayer/MainActivity.kt <<'EOF'
+          package com.floatplayer
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.OpenableColumns
+          import android.provider.Settings
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
+          import android.widget.Toast
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          class MainActivity : Activity() {
+              private lateinit var web: WebView
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.statusBarColor = Color.parseColor("#0e2233")
+                  web = WebView(this)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.setBackgroundColor(Color.parseColor("#0e2233"))
+                  web.addJavascriptInterface(Bridge(), "Android")
+                  setContentView(web)
+                  web.loadUrl("file:///android_asset/index.html")
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+                  }
+              }
+
+              override fun onBackPressed() {
+                  web.evaluateJavascript("goBack()") { if (it == "true") finish() }
+              }
+
+              private fun nameOf(u: Uri): String {
+                  var n = "صوتية"
+                  try {
+                      contentResolver.query(u, null, null, null, null)?.use { c ->
+                          if (c.moveToFirst()) {
+                              val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                              if (i >= 0) n = c.getString(i)
+                          }
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return n.substringBeforeLast('.')
+              }
+
+              override fun onActivityResult(rc: Int, res: Int, d: Intent?) {
+                  super.onActivityResult(rc, res, d)
+                  if (rc == 7 && res == RESULT_OK && d != null) {
+                      val uris = ArrayList<Uri>()
+                      val cd = d.clipData
+                      if (cd != null) {
+                          for (i in 0 until cd.itemCount) uris.add(cd.getItemAt(i).uri)
+                      } else if (d.data != null) {
+                          uris.add(d.data!!)
+                      }
+                      val arr = JSONArray()
+                      for (u in uris) {
+                          try {
+                              contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          } catch (e: Exception) {
+                          }
+                          arr.put(JSONObject().put("uri", u.toString()).put("name", nameOf(u)))
+                      }
+                      web.evaluateJavascript("onPicked(" + arr.toString() + ")", null)
+                  }
+              }
+
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun pick() {
+                      runOnUiThread {
+                          val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                          i.addCategory(Intent.CATEGORY_OPENABLE)
+                          i.type = "audio/*"
+                          i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                          i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                          startActivityForResult(i, 7)
+                      }
+                  }
+
+                  @JavascriptInterface
+                  fun play(q: String, i: Int, p: Int) {
+                      runOnUiThread {
+                          if (!Settings.canDrawOverlays(this@MainActivity)) {
+                              Toast.makeText(this@MainActivity, "فعّل «العرض فوق التطبيقات الأخرى» ثم ارجع واضغط تشغيل مرة أخرى", Toast.LENGTH_LONG).show()
+                              startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName)))
+                          } else {
+                              val s = Intent(this@MainActivity, PlayerService::class.java)
+                              s.putExtra("queue", q)
+                              s.putExtra("idx", i)
+                              s.putExtra("pos", p)
+                              startForegroundService(s)
+                          }
+                      }
+                  }
+
+                  @JavascriptInterface
+                  fun state(): String = PlayerService.inst?.stateJson() ?: "{}"
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/floatplayer/PlayerService.kt <<'EOF'
+          package com.floatplayer
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.RectF
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.media.MediaPlayer
+          import android.net.Uri
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          fun fmt(ms: Int): String {
+              val s = ms / 1000
+              return "%d:%02d".format(s / 60, s % 60)
+          }
+
+          class PlayerService : Service() {
+              companion object {
+                  var inst: PlayerService? = null
+              }
+
+              lateinit var wm: WindowManager
+              private var mp: MediaPlayer? = null
+              private var ready = false
+              private var queue = JSONArray()
+              private var idx = 0
+              var curUri = ""
+              var curName = ""
+              var loopA = -1
+              var loopB = -1
+              var markA = -1
+              private var bubble: BubbleView? = null
+              private var panel: View? = null
+              private val h = Handler(Looper.getMainLooper())
+              private val tick = object : Runnable {
+                  override fun run() {
+                      try {
+                          if (ready && loopA >= 0 && loopB > loopA && pos() >= loopB) mp?.seekTo(loopA)
+                      } catch (e: Exception) {
+                      }
+                      bubble?.invalidate()
+                      h.postDelayed(this, 250)
+                  }
+              }
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  inst = this
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(NotificationChannel("pl", "المشغّل", NotificationManager.IMPORTANCE_LOW))
+                  h.post(tick)
+              }
+
+              override fun onDestroy() {
+                  inst = null
+                  super.onDestroy()
+              }
+
+              private fun notif(t: String): Notification =
+                  Notification.Builder(this, "pl")
+                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      .setContentTitle(t)
+                      .setContentText("المشغّل العائم يعمل")
+                      .setOngoing(true)
+                      .build()
+
+              override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
+                  startForeground(1, notif(if (curName.isEmpty()) "المشغّل" else curName))
+                  if (i != null && i.hasExtra("queue")) {
+                      queue = JSONArray(i.getStringExtra("queue"))
+                      playAt(i.getIntExtra("idx", 0), i.getIntExtra("pos", 0))
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun playAt(i: Int, p: Int) {
+                  val o = queue.getJSONObject(i)
+                  idx = i
+                  curUri = o.getString("uri")
+                  curName = o.getString("name")
+                  loopA = -1
+                  loopB = -1
+                  markA = -1
+                  ready = false
+                  try {
+                      mp?.release()
+                  } catch (e: Exception) {
+                  }
+                  val m = MediaPlayer()
+                  mp = m
+                  try {
+                      m.setDataSource(this, Uri.parse(curUri))
+                      m.setOnPreparedListener {
+                          ready = true
+                          if (p > 0) it.seekTo(p)
+                          it.start()
+                      }
+                      m.setOnCompletionListener {
+                          if (idx + 1 < queue.length()) playAt(idx + 1, 0)
+                      }
+                      m.setOnErrorListener { _, _, _ ->
+                          ready = false
+                          true
+                      }
+                      m.prepareAsync()
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "تعذّر تشغيل الملف", Toast.LENGTH_SHORT).show()
+                  }
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  nm.notify(1, notif(curName))
+                  ensureBubble()
+              }
+
+              fun pos(): Int = try { if (ready) (mp?.currentPosition ?: 0) else 0 } catch (e: Exception) { 0 }
+              fun dur(): Int = try { if (ready) (mp?.duration ?: 0) else 0 } catch (e: Exception) { 0 }
+              fun playing(): Boolean = try { ready && (mp?.isPlaying ?: false) } catch (e: Exception) { false }
+
+              fun toggle() {
+                  val m = mp ?: return
+                  if (!ready) return
+                  if (m.isPlaying) m.pause() else m.start()
+                  bubble?.invalidate()
+              }
+
+              fun seekBy(ms: Int) {
+                  val m = mp ?: return
+                  if (!ready) return
+                  m.seekTo((m.currentPosition + ms).coerceIn(0, maxOf(0, m.duration - 300)))
+              }
+
+              fun stateJson(): String = try {
+                  JSONObject().put("uri", curUri).put("playing", playing()).put("pos", pos()).put("dur", dur()).toString()
+              } catch (e: Exception) {
+                  "{}"
+              }
+
+              fun dp(x: Int): Int = (x * resources.displayMetrics.density).toInt()
+
+              private val sp: SharedPreferences
+                  get() = getSharedPreferences("ab", Context.MODE_PRIVATE)
+
+              fun clips(): MutableList<IntArray> {
+                  val r = mutableListOf<IntArray>()
+                  try {
+                      val a = JSONArray(sp.getString(curUri, "[]"))
+                      for (k in 0 until a.length()) {
+                          val x = a.getJSONArray(k)
+                          r.add(intArrayOf(x.getInt(0), x.getInt(1)))
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return r
+              }
+
+              private fun saveClips(l: List<IntArray>) {
+                  val a = JSONArray()
+                  for (c in l) a.put(JSONArray().put(c[0]).put(c[1]))
+                  sp.edit().putString(curUri, a.toString()).apply()
+              }
+
+              private fun ensureBubble() {
+                  if (bubble != null) return
+                  val v = BubbleView(this, this)
+                  val p = WindowManager.LayoutParams(
+                      dp(130), dp(130),
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  p.gravity = Gravity.TOP or Gravity.START
+                  p.x = resources.displayMetrics.widthPixels - dp(150)
+                  p.y = dp(150)
+                  v.lp = p
+                  wm.addView(v, p)
+                  bubble = v
+              }
+
+              fun closePanel() {
+                  panel?.let {
+                      try {
+                          wm.removeView(it)
+                      } catch (e: Exception) {
+                      }
+                  }
+                  panel = null
+              }
+
+              fun closeAll() {
+                  closePanel()
+                  bubble?.let {
+                      try {
+                          wm.removeView(it)
+                      } catch (e: Exception) {
+                      }
+                  }
+                  bubble = null
+                  h.removeCallbacksAndMessages(null)
+                  try {
+                      mp?.release()
+                  } catch (e: Exception) {
+                  }
+                  mp = null
+                  ready = false
+                  curUri = ""
+                  stopForeground(STOP_FOREGROUND_REMOVE)
+                  stopSelf()
+              }
+
+              private fun btn(t: String, col: String, f: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = t
+                  b.isAllCaps = false
+                  b.setTextColor(Color.WHITE)
+                  val g = GradientDrawable()
+                  g.setColor(Color.parseColor(col))
+                  g.cornerRadius = dp(14).toFloat()
+                  b.background = g
+                  b.setOnClickListener { f() }
+                  return b
+              }
+
+              private fun tv(t: String, sz: Int): TextView {
+                  val x = TextView(this)
+                  x.text = t
+                  x.textSize = sz.toFloat()
+                  x.setTextColor(Color.WHITE)
+                  x.setPadding(dp(4), dp(6), dp(4), dp(6))
+                  return x
+              }
+
+              fun openPanel() {
+                  if (curUri.isEmpty()) return
+                  closePanel()
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.layoutDirection = View.LAYOUT_DIRECTION_RTL
+                  root.setPadding(dp(14), dp(14), dp(14), dp(14))
+                  val bg = GradientDrawable()
+                  bg.setColor(Color.parseColor("#15324a"))
+                  bg.cornerRadius = dp(22).toFloat()
+                  root.background = bg
+                  root.addView(tv("🔁 تكرار مقطع (A ← B)", 17))
+
+                  val row = LinearLayout(this)
+                  row.addView(
+                      btn(if (markA >= 0) "A = " + fmt(markA) else "تحديد A", "#1f6f94") {
+                          markA = pos()
+                          openPanel()
+                      },
+                      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  )
+                  row.addView(
+                      btn("تحديد B وحفظ", "#e5473f") {
+                          val b = pos()
+                          if (markA < 0 || b <= markA + 1000) {
+                              Toast.makeText(this, "حدّد A أولاً ثم B بعده", Toast.LENGTH_SHORT).show()
+                          } else {
+                              val l = clips()
+                              l.add(intArrayOf(markA, b))
+                              saveClips(l)
+                              markA = -1
+                              openPanel()
+                          }
+                      },
+                      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  )
+                  root.addView(row)
+
+                  for ((n, c) in clips().withIndex()) {
+                      val r = LinearLayout(this)
+                      r.gravity = Gravity.CENTER_VERTICAL
+                      val on = loopA == c[0] && loopB == c[1]
+                      r.addView(
+                          tv(fmt(c[0]) + " ← " + fmt(c[1]), 16),
+                          LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                      )
+                      r.addView(btn(if (on) "⏹" else "🔁", "#1f6f94") {
+                          if (on) {
+                              loopA = -1
+                              loopB = -1
+                          } else {
+                              loopA = c[0]
+                              loopB = c[1]
+                              mp?.seekTo(c[0])
+                              if (ready) mp?.start()
+                          }
+                          openPanel()
+                      })
+                      r.addView(btn("🗑", "#e5473f") {
+                          val l = clips()
+                          l.removeAt(n)
+                          if (on) {
+                              loopA = -1
+                              loopB = -1
+                          }
+                          saveClips(l)
+                          openPanel()
+                      })
+                      root.addView(r)
+                  }
+                  root.addView(btn("إغلاق", "#3b5d78") { closePanel() })
+
+                  val p = WindowManager.LayoutParams(
+                      resources.displayMetrics.widthPixels - dp(24),
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  p.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                  p.y = dp(24)
+                  wm.addView(root, p)
+                  panel = root
+              }
+          }
+
+          class BubbleView(ctx: Context, private val svc: PlayerService) : View(ctx) {
+              var lp: WindowManager.LayoutParams? = null
+              private val d = ctx.resources.displayMetrics.density
+              private val sz = 130f * d
+              private val c = sz / 2
+              private val pt = Paint(Paint.ANTI_ALIAS_FLAG)
+              private var downX = 0f
+              private var downY = 0f
+              private var sx = 0
+              private var sy = 0
+              private var zone = 0
+              private var moved = false
+              private var longFired = false
+              private val longRun = Runnable {
+                  longFired = true
+                  svc.openPanel()
+              }
+
+              override fun onMeasure(w: Int, hh: Int) {
+                  setMeasuredDimension(sz.toInt(), sz.toInt())
+              }
+
+              private fun mark(cv: Canvas, ms: Int, dur: Int, col: String) {
+                  pt.color = Color.parseColor(col)
+                  val a = Math.toRadians(-90.0 + 360.0 * ms / dur)
+                  cv.drawCircle(c + 61 * d * Math.cos(a).toFloat(), c + 61 * d * Math.sin(a).toFloat(), 3.5f * d, pt)
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  val dur = svc.dur()
+                  val frac = if (dur > 0) svc.pos().toFloat() / dur else 0f
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 4 * d
+                  pt.color = Color.parseColor("#3b5d78")
+                  cv.drawCircle(c, c, 61 * d, pt)
+                  pt.strokeWidth = 1.6f * d
+                  pt.color = Color.parseColor("#7fb4d4")
+                  cv.drawArc(RectF(c - 61 * d, c - 61 * d, c + 61 * d, c + 61 * d), -90f, 360f * frac, false, pt)
+                  pt.style = Paint.Style.FILL
+                  if (dur > 0) {
+                      for (cl in svc.clips()) {
+                          mark(cv, cl[0], dur, "#ff4fa3")
+                          mark(cv, cl[1], dur, "#ffd23f")
+                      }
+                  }
+                  val a = Math.toRadians(-90.0 + 360.0 * frac)
+                  pt.color = Color.WHITE
+                  cv.drawCircle(c + 61 * d * Math.cos(a).toFloat(), c + 61 * d * Math.sin(a).toFloat(), 5 * d, pt)
+
+                  pt.color = Color.parseColor("#1e6a8f")
+                  cv.drawCircle(c, c, 49 * d, pt)
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 3 * d
+                  pt.color = Color.parseColor("#4a9cc4")
+                  cv.drawCircle(c, c, 49 * d, pt)
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.parseColor("#e5473f")
+                  cv.drawCircle(c, c, 22 * d, pt)
+                  pt.color = Color.WHITE
+                  if (svc.playing()) {
+                      cv.drawRect(c - 8 * d, c - 9 * d, c - 3 * d, c + 9 * d, pt)
+                      cv.drawRect(c + 3 * d, c - 9 * d, c + 8 * d, c + 9 * d, pt)
+                  } else {
+                      val p = Path()
+                      p.moveTo(c - 6 * d, c - 10 * d)
+                      p.lineTo(c - 6 * d, c + 10 * d)
+                      p.lineTo(c + 10 * d, c)
+                      p.close()
+                      cv.drawPath(p, pt)
+                  }
+
+                  pt.textAlign = Paint.Align.CENTER
+                  pt.typeface = Typeface.DEFAULT_BOLD
+                  pt.textSize = 20 * d
+                  cv.drawText("«", c - 36 * d, c, pt)
+                  cv.drawText("»", c + 36 * d, c, pt)
+                  pt.textSize = 14 * d
+                  cv.drawText("15", c - 36 * d, c + 17 * d, pt)
+                  cv.drawText("15", c + 36 * d, c + 17 * d, pt)
+
+                  pt.color = Color.parseColor("#0e2233")
+                  cv.drawCircle(sz - 14 * d, 14 * d, 11 * d, pt)
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 2 * d
+                  pt.color = Color.parseColor("#4a9cc4")
+                  cv.drawCircle(sz - 14 * d, 14 * d, 11 * d, pt)
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.WHITE
+                  pt.textSize = 12 * d
+                  cv.drawText("✕", sz - 14 * d, 18 * d, pt)
+
+                  pt.color = Color.parseColor(if (svc.loopA >= 0) "#e5473f" else "#0e2233")
+                  cv.drawRoundRect(RectF(c - 19 * d, sz - 38 * d, c + 19 * d, sz - 18 * d), 9 * d, 9 * d, pt)
+                  pt.color = Color.WHITE
+                  pt.textSize = 10 * d
+                  cv.drawText("A-B", c, sz - 24 * d, pt)
+              }
+
+              private fun hit(x: Float, y: Float): Int {
+                  fun dist(ax: Float, ay: Float): Float = Math.hypot((x - ax).toDouble(), (y - ay).toDouble()).toFloat()
+                  if (dist(sz - 14 * d, 14 * d) < 17 * d) return 4
+                  if (x > c - 20 * d && x < c + 20 * d && y > sz - 40 * d && y < sz - 16 * d) return 5
+                  if (dist(c, c) < 27 * d) return 1
+                  if (y > c - 28 * d && y < c + 28 * d) {
+                      if (x > c - 56 * d && x < c - 20 * d) return 2
+                      if (x > c + 20 * d && x < c + 56 * d) return 3
+                  }
+                  return 0
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          downX = e.rawX
+                          downY = e.rawY
+                          sx = lp?.x ?: 0
+                          sy = lp?.y ?: 0
+                          zone = hit(e.x, e.y)
+                          moved = false
+                          longFired = false
+                          if (zone == 1) postDelayed(longRun, 550)
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          val dx = e.rawX - downX
+                          val dy = e.rawY - downY
+                          if (!moved && Math.hypot(dx.toDouble(), dy.toDouble()) > 12 * d) {
+                              moved = true
+                              removeCallbacks(longRun)
+                          }
+                          if (moved) {
+                              val p = lp
+                              if (p != null) {
+                                  p.x = sx + dx.toInt()
+                                  p.y = sy + dy.toInt()
+                                  svc.wm.updateViewLayout(this, p)
+                              }
+                          }
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          removeCallbacks(longRun)
+                          if (!moved && !longFired) {
+                              when (zone) {
+                                  1 -> svc.toggle()
+                                  2 -> svc.seekBy(-15000)
+                                  3 -> svc.seekBy(15000)
+                                  4 -> svc.closeAll()
+                                  5 -> svc.openPanel()
+                              }
+                          }
+                      }
+                      MotionEvent.ACTION_CANCEL -> removeCallbacks(longRun)
+                  }
+                  invalidate()
+                  return true
+              }
+          }
+          EOF
+
+          cat > app/src/main/assets/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="ar" dir="rtl">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <style>
+          :root{--bg:#0e2233;--card:#15324a;--tx:#eef6fb;--mu:#8fb0c7;--b:#4cc2e8;--c:#e5473f}
+          *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+          body{margin:0;padding:16px 14px 60px;background:var(--bg);color:var(--tx);font-family:sans-serif}
+          h1{font-size:20px;margin:4px 0 12px;color:var(--b)}
+          h3{margin:16px 4px 6px}
+          .btn{display:block;width:100%;border:0;border-radius:14px;padding:13px;margin:6px 0;font:inherit;font-weight:700;color:#fff;background:linear-gradient(135deg,#1f7aa6,var(--c))}
+          .btn.s{background:var(--card);border:1px solid #4cc2e855}
+          .card{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:18px;padding:12px 14px;margin:8px 0}
+          .card .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          .card small{display:block;color:var(--mu)}
+          .ic{border:0;border-radius:12px;width:40px;height:40px;font-size:17px;background:#e5473f33;color:var(--tx)}
+          .cur{outline:2px solid var(--b)}
+          .note{color:var(--mu);font-size:13px;padding:6px 4px}
+          </style>
+          </head>
+          <body>
+          <h1>🎧 مشغّل الدراسة</h1>
+          <div id="app"></div>
+          <script>
+          let S;
+          try { S = JSON.parse(localStorage.getItem('st') || 'null'); } catch (e) { S = null; }
+          if (!S) S = { lists: [], last: null, open: null };
+          S.open = null;
+          let target = null;
+          const save = () => { try { localStorage.setItem('st', JSON.stringify(S)); } catch (e) {} };
+          const uid = () => Math.random().toString(36).slice(2, 9);
+          const L = id => S.lists.find(l => l.id == id);
+          const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const fmt = ms => Math.floor(ms / 60000) + ':' + String(Math.floor(ms / 1000) % 60).padStart(2, '0');
+
+          function addNew() { target = null; Android.pick(); }
+          function addTo(id) { target = id; Android.pick(); }
+          function onPicked(a) {
+            if (!a.length) return;
+            const tr = a.map(x => ({ id: uid(), name: x.name, uri: x.uri }));
+            if (target && L(target)) {
+              L(target).tracks.push(...tr);
+            } else {
+              S.lists.push({ id: uid(), name: a.length > 1 ? 'قائمة ' + (S.lists.length + 1) : tr[0].name, tracks: tr });
+            }
+            save(); render();
+          }
+          function play(lid, tid, pos) {
+            const l = L(lid);
+            const i = l.tracks.findIndex(t => t.id == tid);
+            S.last = { l: lid, t: tid, pos: pos || 0 };
+            save();
+            Android.play(JSON.stringify(l.tracks.map(t => ({ uri: t.uri, name: t.name }))), i, pos || 0);
+            render();
+          }
+          function tap(lid, tid) { play(lid, tid, S.last && S.last.t == tid ? S.last.pos : 0); }
+          function resume() { const x = S.last; if (x && L(x.l)) play(x.l, x.t, x.pos); }
+          function openL(id) { S.open = id; render(); }
+          function delL(id) {
+            if (!confirm('حذف القائمة؟')) return;
+            S.lists = S.lists.filter(l => l.id != id);
+            save(); render();
+          }
+          function delT(lid, tid) {
+            const l = L(lid);
+            l.tracks = l.tracks.filter(t => t.id != tid);
+            save(); render();
+          }
+          function goBack() {
+            if (S.open) { S.open = null; render(); return false; }
+            return true;
+          }
+          function render() {
+            const a = document.getElementById('app');
+            if (!S.open) {
+              const x = S.last && L(S.last.l);
+              a.innerHTML =
+                '<button class="btn" onclick="addNew()">＋ إضافة صوتية / قائمة جديدة</button>' +
+                (x ? `<button class="btn s" onclick="resume()">▶ متابعة آخر صوتية (${fmt(S.last.pos)})</button>` : '') +
+                '<h3>قوائم التشغيل</h3>' +
+                (S.lists.map(l => `<div class="card${S.last && S.last.l == l.id ? ' cur' : ''}" onclick="openL('${l.id}')"><span style="font-size:24px">📁</span><div class="t">${esc(l.name)}<small>${l.tracks.length} ملف</small></div><button class="ic" onclick="event.stopPropagation();delL('${l.id}')">🗑</button></div>`).join('') || '<div class="note">لا توجد قوائم بعد. أضف صوتياتك للبدء.</div>');
+            } else {
+              const l = L(S.open);
+              if (!l) { S.open = null; render(); return; }
+              a.innerHTML =
+                '<button class="btn s" onclick="goBack()">→ رجوع</button>' +
+                `<h3>📁 ${esc(l.name)}</h3>` +
+                `<button class="btn" onclick="addTo('${l.id}')">＋ إضافة ملفات للقائمة</button>` +
+                (l.tracks.map(t => `<div class="card${S.last && S.last.t == t.id ? ' cur' : ''}" onclick="tap('${l.id}','${t.id}')"><span style="font-size:22px">🎵</span><div class="t">${esc(t.name)}</div><button class="ic" onclick="event.stopPropagation();delT('${l.id}','${t.id}')">🗑</button></div>`).join('') || '<div class="note">القائمة فارغة.</div>');
+            }
+          }
+          setInterval(() => {
+            try {
+              const s = JSON.parse(Android.state());
+              if (!s.uri) return;
+              for (const l of S.lists) {
+                const t = l.tracks.find(t => t.uri == s.uri);
+                if (t) {
+                  const ch = !S.last || S.last.t != t.id;
+                  S.last = { l: l.id, t: t.id, pos: s.pos };
+                  save();
+                  if (ch) render();
+                  return;
+                }
+              }
+            } catch (e) {}
+          }, 1000);
+          render();
+          </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatPlayer-APK
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK to Releases
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ github.run_number }}" proj/app/build/outputs/apk/debug/app-debug.apk --title "FloatPlayer v${{ github.run_number }}" --notes "ملف التثبيت app-debug.apk"
