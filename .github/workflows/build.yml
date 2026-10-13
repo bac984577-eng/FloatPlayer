@@ -451,4 +451,62 @@ jobs:
               private val c = sz / 2
               private val pt = Paint(Paint.ANTI_ALIAS_FLAG)
               private var downX = 0f
-              private var downY = 0
+              private var downY = 0f
+              private var sx = 0
+              private var sy = 0
+              private var zone = 0
+              private var moved = false
+
+              override fun onMeasure(w: Int, hh: Int) {
+                  setMeasuredDimension(sz.toInt(), sz.toInt())
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  val dur = svc.dur()
+                  val frac = if (dur > 0) svc.pos().toFloat() / dur else 0f
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 4 * d
+                  pt.color = Color.parseColor("#3b5d78")
+                  cv.drawCircle(c, c, 61 * d, pt)
+                  pt.strokeWidth = 1.6f * d
+                  pt.color = Color.parseColor("#7fb4d4")
+                  cv.drawArc(RectF(c - 61 * d, c - 61 * d, c + 61 * d, c + 61 * d), -90f, 360f * frac, false, pt)
+
+                  val a = Math.toRadians(-90.0 + 360.0 * frac)
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.WHITE
+                  cv.drawCircle(c + 61 * d * Math.cos(a).toFloat(), c + 61 * d * Math.sin(a).toFloat(), 5 * d, pt)
+
+                  pt.color = Color.parseColor("#1e6a8f")
+                  cv.drawCircle(c, c, 49 * d, pt)
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 3 * d
+                  pt.color = Color.parseColor("#4a9cc4")
+                  cv.drawCircle(c, c, 49 * d, pt)
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.parseColor("#e5473f")
+                  cv.drawCircle(c, c, 22 * d, pt)
+                  pt.color = Color.WHITE
+                  if (svc.playing()) {
+                      cv.drawRect(c - 8 * d, c - 9 * d, c - 3 * d, c + 9 * d, pt)
+                      cv.drawRect(c + 3 * d, c - 9 * d, c + 8 * d, c + 9 * d, pt)
+                  } else {
+                      val p = Path()
+                      p.moveTo(c - 6 * d, c - 10 * d)
+                      p.lineTo(c - 6 * d, c + 10 * d)
+                      p.lineTo(c + 10 * d, c)
+                      p.close()
+                      cv.drawPath(p, pt)
+                  }
+
+                  pt.textAlign = Paint.Align.CENTER
+                  pt.typeface = Typeface.DEFAULT_BOLD
+                  pt.textSize = 20 * d
+                  cv.drawText("«", c - 36 * d, c, pt)
+                  cv.drawText("»", c + 36 * d, c, pt)
+                  pt.textSize = 14 * d
+                  cv.drawText("15", c - 36 * d, c + 17 * d, pt)
+                  cv.drawText("15", c + 36 * d, c + 17 * d, pt)
+
+                  pt.color = Color.parseColor("#0e2233")
+                  cv.drawCircle(sz - 14 * d, 14 * d, 11 * d, pt
