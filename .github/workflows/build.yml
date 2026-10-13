@@ -1,4 +1,4 @@
-Name: Build Android APK
+name: Build Android APK
 
 on:
   push:
@@ -115,7 +115,6 @@ jobs:
           </manifest>
           EOF
 
-          # Generate a clean vector icon for launcher
           cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp"
@@ -455,4 +454,405 @@ jobs:
                   closePanel()
                   bubble?.let {
                       try {
-                          wm.removeView(
+                          wm.removeView(it)
+                      } catch (e: Exception) {
+                      }
+                  }
+                  bubble = null
+                  h.removeCallbacksAndMessages(null)
+                  try {
+                      mp?.release()
+                  } catch (e: Exception) {
+                  }
+                  mp = null
+                  ready = false
+                  curUri = ""
+                  stopForeground(STOP_FOREGROUND_REMOVE)
+                  stopSelf()
+              }
+
+              private fun btn(t: String, col: String, f: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = t
+                  b.isAllCaps = false
+                  b.setTextColor(Color.WHITE)
+                  val g = GradientDrawable()
+                  g.setColor(Color.parseColor(col))
+                  g.cornerRadius = dp(14).toFloat()
+                  b.background = g
+                  b.setOnClickListener { f() }
+                  return b
+              }
+
+              private fun tv(t: String, sz: Int): TextView {
+                  val x = TextView(this)
+                  x.text = t
+                  x.textSize = sz.toFloat()
+                  x.setTextColor(Color.WHITE)
+                  x.setPadding(dp(4), dp(6), dp(4), dp(6))
+                  return x
+              }
+
+              fun openPanel() {
+                  if (curUri.isEmpty()) return
+                  closePanel()
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.layoutDirection = View.LAYOUT_DIRECTION_RTL
+                  root.setPadding(dp(14), dp(14), dp(14), dp(14))
+                  val bg = GradientDrawable()
+                  bg.setColor(Color.parseColor("#15324a"))
+                  bg.cornerRadius = dp(22).toFloat()
+                  root.background = bg
+
+                  root.addView(tv("🔁 التكرار التلقائي السريع (A - B)", 17))
+                  val currentLoopStatus = if (loopA >= 0 && loopB > loopA) "الحالة: مفعّل (${fmt(loopA)} ←${fmt(loopB)})" else "الحالة: غير متصل (حدد من الدائرة)"
+                  root.addView(tv(currentLoopStatus, 14))
+
+                  val row = LinearLayout(this)
+                  row.addView(
+                      btn("تعيين النقطة A الآن", "#1f6f94") {
+                          loopA = pos()
+                          Toast.makeText(this, "تم تعيين A: ${fmt(loopA)}", Toast.LENGTH_SHORT).show()
+                          openPanel()
+                      },
+                      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  )
+                  row.addView(
+                      btn("تعيين B وتفعيل", "#e5473f") {
+                          val b = pos()
+                          if (loopA < 0 || b <= loopA + 500) {
+                              Toast.makeText(this, "حدد النقطة A أولاً بشكل صحيح", Toast.LENGTH_SHORT).show()
+                          } else {
+                              loopB = b
+                              Toast.makeText(this, "بدء التكرار التلقائي بينهما!", Toast.LENGTH_SHORT).show()
+                              closePanel()
+                          }
+                      },
+                      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  )
+                  root.addView(row)
+
+                  if (loopA >= 0) {
+                      root.addView(btn("إلغاء التكرار", "#3b5d78") {
+                          loopA = -1
+                          loopB = -1
+                          openPanel()
+                      })
+                  }
+
+                  root.addView(btn("إغلاق القائمة", "#3b5d78") { closePanel() })
+
+                  val p = WindowManager.LayoutParams(
+                      resources.displayMetrics.widthPixels - dp(24),
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  p.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                  p.y = dp(24)
+                  wm.addView(root, p)
+                  panel = root
+              }
+          }
+
+          class BubbleView(ctx: Context, private val svc: PlayerService) : View(ctx) {
+              var lp: WindowManager.LayoutParams? = null
+              private val d = ctx.resources.displayMetrics.density
+              private val sz = 130f * d
+              private val c = sz / 2
+              private val pt = Paint(Paint.ANTI_ALIAS_FLAG)
+              private var downX = 0f
+              private var downY = 0f
+              private var sx = 0
+              private var sy = 0
+              private var zone = 0
+              private var moved = false
+              private var longFired = false
+              private val longRun = Runnable {
+                  longFired = true
+                  svc.openPanel()
+              }
+
+              override fun onMeasure(w: Int, hh: Int) {
+                  setMeasuredDimension(sz.toInt(), sz.toInt())
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  val dur = svc.dur()
+                  val frac = if (dur > 0) svc.pos().toFloat() / dur else 0f
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 4 * d
+                  pt.color = Color.parseColor("#3b5d78")
+                  cv.drawCircle(c, c, 61 * d, pt)
+                  pt.strokeWidth = 1.6f * d
+                  pt.color = Color.parseColor("#7fb4d4")
+                  cv.drawArc(RectF(c - 61 * d, c - 61 * d, c + 61 * d, c + 61 * d), -90f, 360f * frac, false, pt)
+
+                  val a = Math.toRadians(-90.0 + 360.0 * frac)
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.WHITE
+                  cv.drawCircle(c + 61 * d * Math.cos(a).toFloat(), c + 61 * d * Math.sin(a).toFloat(), 5 * d, pt)
+
+                  pt.color = Color.parseColor("#1e6a8f")
+                  cv.drawCircle(c, c, 49 * d, pt)
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 3 * d
+                  pt.color = Color.parseColor("#4a9cc4")
+                  cv.drawCircle(c, c, 49 * d, pt)
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.parseColor("#e5473f")
+                  cv.drawCircle(c, c, 22 * d, pt)
+                  pt.color = Color.WHITE
+                  if (svc.playing()) {
+                      cv.drawRect(c - 8 * d, c - 9 * d, c - 3 * d, c + 9 * d, pt)
+                      cv.drawRect(c + 3 * d, c - 9 * d, c + 8 * d, c + 9 * d, pt)
+                  } else {
+                      val p = Path()
+                      p.moveTo(c - 6 * d, c - 10 * d)
+                      p.lineTo(c - 6 * d, c + 10 * d)
+                      p.lineTo(c + 10 * d, c)
+                      p.close()
+                      cv.drawPath(p, pt)
+                  }
+
+                  pt.textAlign = Paint.Align.CENTER
+                  pt.typeface = Typeface.DEFAULT_BOLD
+                  pt.textSize = 20 * d
+                  cv.drawText("«", c - 36 * d, c, pt)
+                  cv.drawText("»", c + 36 * d, c, pt)
+                  pt.textSize = 14 * d
+                  cv.drawText("15", c - 36 * d, c + 17 * d, pt)
+                  cv.drawText("15", c + 36 * d, c + 17 * d, pt)
+
+                  pt.color = Color.parseColor("#0e2233")
+                  cv.drawCircle(sz - 14 * d, 14 * d, 11 * d, pt)
+                  pt.style = Paint.Style.STROKE
+                  pt.strokeWidth = 2 * d
+                  pt.color = Color.parseColor("#4a9cc4")
+                  cv.drawCircle(sz - 14 * d, 14 * d, 11 * d, pt)
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.WHITE
+                  pt.textSize = 12 * d
+                  cv.drawText("✕", sz - 14 * d, 18 * d, pt)
+
+                  pt.color = Color.parseColor(if (svc.loopA >= 0) "#e5473f" else "#0e2233")
+                  cv.drawRoundRect(RectF(c - 19 * d, sz - 38 * d, c + 19 * d, sz - 18 * d), 9 * d, 9 * d, pt)
+                  pt.color = Color.WHITE
+                  pt.textSize = 10 * d
+                  cv.drawText("A-B", c, sz - 24 * d, pt)
+              }
+
+              private fun hit(x: Float, y: Float): Int {
+                  fun dist(ax: Float, ay: Float): Float = Math.hypot((x - ax).toDouble(), (y - ay).toDouble()).toFloat()
+                  if (dist(sz - 14 * d, 14 * d) < 17 * d) return 4
+                  if (x > c - 20 * d && x < c + 20 * d && y > sz - 40 * d && y < sz - 16 * d) return 5
+                  if (dist(c, c) < 27 * d) return 1
+                  if (y > c - 28 * d && y < c + 28 * d) {
+                      if (x > c - 56 * d && x < c - 20 * d) return 2
+                      if (x > c + 20 * d && x < c + 56 * d) return 3
+                  }
+                  return 0
+              }
+
+              private fun seekToTouch(x: Float, y: Float) {
+                  val dur = svc.dur()
+                  if (dur <= 0) return
+                  val dx = x - c
+                  val dy = y - c
+                  var angle = Math.toDegrees(Math.atan2(dy.toDouble(), dx.toDouble())) + 90.0
+                  if (angle < 0) angle += 360.0
+                  val targetMs = ((angle / 360.0) * dur).toInt()
+                  svc.seekTo(targetMs)
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          downX = e.rawX
+                          downY = e.rawY
+                          sx = lp?.x ?: 0
+                          sy = lp?.y ?: 0
+                          zone = hit(e.x, e.y)
+                          moved = false
+                          longFired = false
+                          if (zone == 1) postDelayed(longRun, 550)
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          val dx = e.rawX - downX
+                          val dy = e.rawY - downY
+                          if (!moved && Math.hypot(dx.toDouble(), dy.toDouble()) > 12 * d) {
+                              moved = true
+                              removeCallbacks(longRun)
+                          }
+                          if (moved) {
+                              val p = lp
+                              if (p != null) {
+                                  p.x = sx + dx.toInt()
+                                  p.y = sy + dy.toInt()
+                                  svc.wm.updateViewLayout(this, p)
+                              }
+                          }
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          removeCallbacks(longRun)
+                          if (!moved && !longFired) {
+                              val distFromCenter = Math.hypot((e.x - c).toDouble(), (e.y - c).toDouble())
+                              if (distFromCenter in (50 * d)..(68 * d)) {
+                                  seekToTouch(e.x, e.y)
+                              } else {
+                                  when (zone) {
+                                      1 -> svc.toggle()
+                                      2 -> svc.seekBy(-15000)
+                                      3 -> svc.seekBy(15000)
+                                      4 -> svc.closeAll()
+                                      5 -> svc.openPanel()
+                                  }
+                              }
+                          }
+                      }
+                      MotionEvent.ACTION_CANCEL -> removeCallbacks(longRun)
+                  }
+                  invalidate()
+                  return true
+              }
+          }
+          EOF
+
+          cat > app/src/main/assets/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="ar" dir="rtl">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <style>
+          :root{--bg:#0e2233;--card:#15324a;--tx:#eef6fb;--mu:#8fb0c7;--b:#4cc2e8;--c:#e5473f}
+          *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+          body{margin:0;padding:16px 14px 60px;background:var(--bg);color:var(--tx);font-family:sans-serif}
+          h1{font-size:20px;margin:4px 0 12px;color:var(--b)}
+          h3{margin:16px 4px 6px}
+          .btn{display:block;width:100%;border:0;border-radius:14px;padding:13px;margin:6px 0;font:inherit;font-weight:700;color:#fff;background:linear-gradient(135deg,#1f7aa6,var(--c))}
+          .btn.s{background:var(--card);border:1px solid #4cc2e855}
+          .card{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:18px;padding:12px 14px;margin:8px 0}
+          .card .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          .card small{display:block;color:var(--mu)}
+          .ic{border:0;border-radius:12px;width:40px;height:40px;font-size:17px;background:#e5473f33;color:var(--tx)}
+          .cur{outline:2px solid var(--b)}
+          .note{color:var(--mu);font-size:13px;padding:6px 4px}
+          </style>
+          </head>
+          <body>
+          <h1>🎧 مشغّل الدراسة</h1>
+          <div id="app"></div>
+          <script>
+          let S;
+          try { S = JSON.parse(localStorage.getItem('st') || 'null'); } catch (e) { S = null; }
+          if (!S) S = { lists: [], last: null, open: null };
+          S.open = null;
+          let target = null;
+          const save = () => { try { localStorage.setItem('st', JSON.stringify(S)); } catch (e) {} };
+          const uid = () => Math.random().toString(36).slice(2, 9);
+          const L = id => S.lists.find(l => l.id == id);
+          const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const fmt = ms => Math.floor(ms / 60000) + ':' + String(Math.floor(ms / 1000) % 60).padStart(2, '0');
+
+          function addNew() { target = null; Android.pick(); }
+          function addTo(id) { target = id; Android.pick(); }
+          function onPicked(a) {
+            if (!a.length) return;
+            const tr = a.map(x => ({ id: uid(), name: x.name, uri: x.uri }));
+            if (target && L(target)) {
+              L(target).tracks.push(...tr);
+            } else {
+              S.lists.push({ id: uid(), name: a.length > 1 ? 'قائمة ' + (S.lists.length + 1) : tr[0].name, tracks: tr });
+            }
+            save(); render();
+          }
+          function play(lid, tid, pos) {
+            const l = L(lid);
+            const i = l.tracks.findIndex(t => t.id == tid);
+            S.last = { l: lid, t: tid, pos: pos || 0 };
+            save();
+            Android.play(JSON.stringify(l.tracks.map(t => ({ uri: t.uri, name: t.name }))), i, pos || 0);
+            render();
+          }
+          function tap(lid, tid) { play(lid, tid, S.last && S.last.t == tid ? S.last.pos : 0); }
+          function resume() { const x = S.last; if (x && L(x.l)) play(x.l, x.t, x.pos); }
+          function openL(id) { S.open = id; render(); }
+          function delL(id) {
+            if (!confirm('حذف القائمة؟')) return;
+            S.lists = S.lists.filter(l => l.id != id);
+            save(); render();
+          }
+          function delT(lid, tid) {
+            const l = L(lid);
+            l.tracks = l.tracks.filter(t => t.id != tid);
+            save(); render();
+          }
+          function goBack() {
+            if (S.open) { S.open = null; render(); return false; }
+            return true;
+          }
+          function render() {
+            const a = document.getElementById('app');
+            if (!S.open) {
+              const x = S.last && L(S.last.l);
+              a.innerHTML =
+                '<button class="btn" onclick="addNew()">＋ إضافة صوتية / قائمة جديدة</button>' +
+                (x ? `<button class="btn s" onclick="resume()">▶ متابعة آخر صوتية (${fmt(S.last.pos)})</button>` : '') +
+                '<h3>قوائم التشغيل</h3>' +
+                (S.lists.map(l => `<div class="card${S.last && S.last.l == l.id ? ' cur' : ''}" onclick="openL('${l.id}')"><span style="font-size:24px">📁</span><div class="t">${esc(l.name)}<small>${l.tracks.length} ملف</small></div><button class="ic" onclick="event.stopPropagation();delL('${l.id}')">🗑</button></div>`).join('') || '<div class="note">لا توجد قوائم بعد. أضف صوتياتك للبدء.</div>');
+            } else {
+              const l = L(S.open);
+              if (!l) { S.open = null; render(); return; }
+              a.innerHTML =
+                '<button class="btn s" onclick="goBack()">→ رجوع</button>' +
+                `<h3>📁 ${esc(l.name)}</h3>` +
+                `<button class="btn" onclick="addTo('${l.id}')">＋ إضافة ملفات للقائمة</button>` +
+                (l.tracks.map(t => `<div class="card${S.last && S.last.t == t.id ? ' cur' : ''}" onclick="tap('${l.id}','${t.id}')"><span style="font-size:22px">🎵</span><div class="t">${esc(t.name)}</div><button class="ic" onclick="event.stopPropagation();delT('${l.id}','${t.id}')">🗑</button></div>`).join('') || '<div class="note">القائمة فارغة.</div>');
+            }
+          }
+          setInterval(() => {
+            try {
+              const s = JSON.parse(Android.state());
+              if (!s.uri) return;
+              for (const l of S.lists) {
+                const t = l.tracks.find(t => t.uri == s.uri);
+                if (t) {
+                  const ch = !S.last || S.last.t != t.id;
+                  S.last = { l: l.id, t: t.id, pos: s.pos };
+                  save();
+                  if (ch) render();
+                  return;
+                }
+              }
+            } catch (e) {}
+          }, 1000);
+          render();
+          </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatPlayer-APK
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK to Releases
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ github.run_number }}" proj/app/build/outputs/apk/debug/app-debug.apk --title "FloatPlayer v${{ github.run_number }}" --notes "ملف التثبيت app-debug.apk"
